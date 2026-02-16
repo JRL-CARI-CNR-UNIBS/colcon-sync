@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colcon-sync"
+version = "0.1.0"
+description = "colcon verb to build (Release) and rsync install/ to a remote workspace"
+requires-python = ">=3.8"
+dependencies = ["colcon-core>=0.7.0"]
+
+[project.entry-points."colcon_core.verb"]
+sync = "colcon_sync.verb.sync:SyncVerb"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["colcon_sync*"]
