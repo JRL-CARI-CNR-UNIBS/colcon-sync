@@ -91,8 +91,6 @@ class SyncVerb(VerbExtensionPoint):
         build_cmd = [
             "colcon",
             "build",
-            "--cmake-args",
-            "-DCMAKE_BUILD_TYPE=Release",
         ]
 
         # Forward package selection args
@@ -104,12 +102,21 @@ class SyncVerb(VerbExtensionPoint):
         _append_multi(build_cmd, "--packages-select-by-dep", args.packages_select_by_dep)
         _append_multi(build_cmd, "--packages-skip-by-dep", args.packages_skip_by_dep)
 
+
         extra_colcon = shlex.split(args.colcon_args) if args.colcon_args else []
         if "--symlink-install" in extra_colcon:
             raise RuntimeError(
                 "This verb enforces non-symlink installs. Remove '--symlink-install' from --colcon-args."
             )
         build_cmd += extra_colcon
+
+        cmake_args = [
+            "--cmake-args",
+            # "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+        ]
+
+        build_cmd += cmake_args
 
         _run(build_cmd, cwd=ws)
 
@@ -118,14 +125,31 @@ class SyncVerb(VerbExtensionPoint):
             raise RuntimeError(f"Local install/ directory not found at: {install_dir}")
 
         # ---- Ensure remote dir exists ----
-        ssh_cmd = ["ssh"]
-        if args.ssh_args:
-            ssh_cmd += shlex.split(args.ssh_args)
-        ssh_cmd += [remote, f"mkdir -p {shlex.quote(remote_install)}"]
-        _run(ssh_cmd)
+        # ssh_cmd = ["ssh"]
+        # if args.ssh_args:
+        #     ssh_cmd += shlex.split(args.ssh_args)
+        # ssh_cmd += [remote, f"mkdir -p {shlex.quote(remote_install)}"]
+        # _run(ssh_cmd)
 
-        # ---- rsync ----
+                # ---- rsync ----
         rsync_cmd_base = ["rsync", "-Laz"]
+
+        # Make rsync use the same SSH options
+        if args.ssh_args:
+            ssh_remote_shell = "ssh " + " ".join(
+                shlex.quote(x) for x in shlex.split(args.ssh_args)
+            )
+            rsync_cmd_base += ["-e", ssh_remote_shell]
+
+        # list changes
+        rsync_cmd_base += ["--itemize-changes", "--out-format=%n"]
+
+        # Create remote destination within the same rsync remote session
+        rsync_cmd_base += [
+            "--rsync-path",
+            f"mkdir -p {shlex.quote(remote_install)} && rsync",
+        ]
+
         if args.rsync_args:
             rsync_cmd_base += shlex.split(args.rsync_args)
 
@@ -154,29 +178,37 @@ class SyncVerb(VerbExtensionPoint):
             return 0
 
         if only_packages_select:
-            # Close match to original script: sync setup/metadata + install/<pkg>/
-            root_patterns = [
-                ".colcon_install_layout",
-                "setup.*",
-                "local_setup.*",
-                "_local_setup_util*",
+            # Single rsync: include root metadata + selected package dirs, exclude everything else
+            rsync_cmd = list(rsync_cmd_base)
+
+            rsync_cmd += [
+                "--include=/.colcon_install_layout",
+                "--include=/setup.*",
+                "--include=/local_setup.*",
+                "--include=/_local_setup_util*",
             ]
-            root_files: List[str] = []
-            for pat in root_patterns:
-                root_files.extend(glob.glob(str(install_dir / pat)))
 
-            if root_files:
-                _run(rsync_cmd_base + root_files + [f"{remote}:{remote_install}/"])
-
+            found_any_pkg = False
             for pkg in args.packages_select:
                 local_pkg_dir = install_dir / pkg
                 if not local_pkg_dir.is_dir():
                     print(f"WARNING: {local_pkg_dir} not found; skipping '{pkg}'")
                     continue
-                _run(rsync_cmd_base + [str(local_pkg_dir) + "/", f"{remote}:{remote_install}/{pkg}/"])
+
+                found_any_pkg = True
+                rsync_cmd += [f"--include=/{pkg}/***"]
+
+            if not found_any_pkg:
+                print("WARNING: no selected package directories found in install/")
+
+            rsync_cmd += [
+                "--exclude=*",
+                str(install_dir) + "/",
+                f"{remote}:{remote_install}/",
+            ]
+            _run(rsync_cmd)
             return 0
 
-        # For --packages-up-to / skip / ignore / above / *-by-dep, the exact closure can vary;
-        # safest is syncing full install/ so the remote env stays coherent.
+        # For --packages-up-to / skip / ignore / above / *-by-dep, safest is syncing full install/
         _run(rsync_cmd_base + [str(install_dir) + "/", f"{remote}:{remote_install}/"])
         return 0
